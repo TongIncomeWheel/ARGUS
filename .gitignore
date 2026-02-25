@@ -17,8 +17,8 @@ logs/
 data/*
 !data/.gitkeep
 
-# Strategy data — track this (user-configured strategy instructions)
-# strategy_data/ is intentionally tracked
+# Strategy data (configurable per-user)
+strategy_data/
 
 # Environment
 .env
