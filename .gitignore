@@ -34,6 +34,9 @@ nul
 .DS_Store
 Thumbs.db
 
+# Dev-only launchers — never merge to live
+START_ARGUS_DEV.bat
+
 # Local tool config
 .claude/
 
