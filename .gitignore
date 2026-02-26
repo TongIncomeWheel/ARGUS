@@ -13,9 +13,6 @@ build/
 *.log
 logs/
 
-# Launcher scripts — port differs between Dev and Prod, each environment has its own
-START_*.bat
-
 # OS artifacts
 nul
 .DS_Store
