@@ -9,25 +9,12 @@ venv/
 dist/
 build/
 
-# Logs
+# Logs — generated at runtime, not environment data
 *.log
 logs/
 
-# Data directory — all runtime/trading data, never commit
-data/*
-!data/.gitkeep
-
-# Strategy data (configurable per-user)
-strategy_data/
-
-# Environment
-.env
-*.env
-
-# Credentials / tokens
-credentials.json
-token.json
-ai_credentials.json
+# Launcher scripts — port differs between Dev and Prod, each environment has its own
+START_*.bat
 
 # OS artifacts
 nul
