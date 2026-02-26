@@ -14,9 +14,11 @@ set /p CHOICE="Enter 1 or 2: "
 if "%CHOICE%"=="1" (
     set ENV_NAME=PROD
     set PORT=8501
+    set APP_DIR=C:\Users\ashtz\IncomeWheel
 ) else if "%CHOICE%"=="2" (
     set ENV_NAME=DEV
     set PORT=8502
+    set APP_DIR=C:\Users\ashtz\ARGUS_Dev
 ) else (
     echo.
     echo   Invalid choice. Please enter 1 or 2.
@@ -27,11 +29,12 @@ if "%CHOICE%"=="1" (
 echo.
 echo ========================================
 echo   Launching %ENV_NAME% on port %PORT%...
+echo   Folder: %APP_DIR%
 echo ========================================
 echo.
 
-REM Change to Income Wheel directory
-cd /d C:\Users\ashtz\IncomeWheel
+REM Change to environment directory
+cd /d %APP_DIR%
 
 echo Checking if port %PORT% is available...
 powershell -Command "$conn = netstat -ano | findstr ':%PORT%' | findstr 'LISTENING'; if ($conn) { $procId = ($conn -split '\s+')[-1]; Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue; Write-Output 'Killed process on port %PORT%'; Start-Sleep -Seconds 2 }"
