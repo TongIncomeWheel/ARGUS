@@ -14,7 +14,7 @@ set /p CHOICE="Enter 1 or 2: "
 if "%CHOICE%"=="1" (
     set ENV_NAME=PROD
     set PORT=8501
-    set APP_DIR=C:\Users\ashtz\IncomeWheel
+    set APP_DIR=C:\Users\ashtz\ARGUS_Prod
 ) else if "%CHOICE%"=="2" (
     set ENV_NAME=DEV
     set PORT=8502
