@@ -33,6 +33,8 @@ def get_tickers_for_dropdown(portfolio: str, df_trades=None):
 from calculations import CapitalCalculator, PremiumCalculator, QuotaCalculator, RiskCalculator, CSPTankCalculator, PMCCCalculator
 from models import TradeValidator, generate_trade_id, generate_audit_id
 from price_feed import PriceFeed, display_price_status, get_cached_prices
+from market_data import MarketDataService as _MarketDataService
+_market_data = _MarketDataService()
 from persistence import get_portfolio_deposit, save_portfolio_deposit, get_margin_percentages, save_margin_percentages, get_capital_allocation, save_capital_allocation, get_portfolio_deposit_sgd, save_portfolio_deposit_sgd, get_fx_rate, save_fx_rate, get_pmcc_tickers, save_pmcc_tickers, get_tickers, save_tickers
 from ai_chat import render_ai_chat
 from strategy_ui import render_strategy_instructions
@@ -522,7 +524,7 @@ def render_sidebar():
                 "Navigate",
                 ["📊 Dashboard", "📋 CIO Report", "📅 Daily Helper", "📝 Entry Forms",
                  "📈 Expiry Ladder", "📊 Performance", "📋 All Positions", "⚙️ Margin Config", "📚 Strategy Instructions",
-                 "🔍 Income Scanner"],
+                 "🔍 Income Scanner", "📡 Market Data"],
                 key="navigation_radio",
                 label_visibility="collapsed"
             )
@@ -1212,9 +1214,18 @@ def render_daily_helper():
     except Exception as e:
         st.warning(f"⚠️ Could not fetch prices: {e}")
         live_prices = st.session_state.get('live_prices', {})
-    
+
+    # Fetch options data + Greeks for open positions (Mode 1 — auto-feed)
+    try:
+        df_options_open = df_open[df_open['TradeType'].isin(['CC', 'CSP'])].copy()
+        if not df_options_open.empty:
+            open_positions_data = _market_data.get_open_positions_data(df_options_open)
+            st.session_state.open_positions_data = open_positions_data
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch options data: {e}")
+
     # Display connection status
-    display_price_status(True)  # Yahoo Finance always available
+    display_price_status(True)
     
     st.divider()
     
@@ -4964,6 +4975,127 @@ def main():
         render_strategy_instructions()
     elif page == "🔍 Income Scanner":
         render_income_scanner()
+    elif page == "📡 Market Data":
+        render_market_data_panel()
+
+
+def render_market_data_panel():
+    """
+    Standalone Market Data query panel (Mode 2B).
+    Allows user to query equity prices, options data, and historical OHLCV
+    independently of the live positions feed.
+    """
+    st.header("📡 Market Data")
+    st.caption("Query live prices, options data, and historical OHLCV — powered by yfinance, Alpaca, and Stooq.")
+
+    tab_equity, tab_options, tab_history = st.tabs(["Equity Quote", "Options Chain", "Historical OHLCV"])
+
+    # ------------------------------------------------------------------
+    # Tab 1 — Equity Quote
+    # ------------------------------------------------------------------
+    with tab_equity:
+        st.subheader("Live Equity Quote")
+        ticker_input = st.text_input("Ticker symbol", placeholder="e.g. MARA, SPY", key="md_equity_ticker").upper().strip()
+        if st.button("Get Quote", key="md_equity_btn") and ticker_input:
+            with st.spinner(f"Fetching {ticker_input}..."):
+                quotes = _market_data.get_equity_prices([ticker_input])
+            if ticker_input in quotes:
+                q = quotes[ticker_input]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Price", f"${q.price:.2f}")
+                c2.metric("Prev Close", f"${q.prev_close:.2f}")
+                change_pct = ((q.price - q.prev_close) / q.prev_close * 100) if q.prev_close else 0
+                c3.metric("Change", f"{change_pct:+.2f}%")
+                st.caption(f"As of {q.timestamp.strftime('%Y-%m-%d %H:%M:%S')} (15-min delay)")
+            else:
+                st.warning(f"Could not retrieve price for {ticker_input}.")
+
+    # ------------------------------------------------------------------
+    # Tab 2 — Options Chain
+    # ------------------------------------------------------------------
+    with tab_options:
+        st.subheader("Open Positions — Options Data")
+        st.caption("Shows bid/ask/last/IV and Greeks for your current open CC and CSP positions.")
+
+        alpaca_ok = _market_data.alpaca_available
+        if not alpaca_ok:
+            st.info("Greeks (Δ Γ Θ) are unavailable — add ALPACA_API_KEY and ALPACA_SECRET_KEY to .env to enable.")
+
+        if st.button("Refresh Options Data", key="md_options_btn"):
+            try:
+                df_trades = st.session_state.get("df_trades")
+                if df_trades is not None and not df_trades.empty:
+                    df_open = df_trades[
+                        (df_trades["Status"] == "Open") &
+                        (df_trades["TradeType"].isin(["CC", "CSP"]))
+                    ].copy()
+                    with st.spinner("Fetching options data..."):
+                        contracts = _market_data.get_open_positions_data(df_open)
+                    st.session_state.open_positions_data = contracts
+                else:
+                    st.warning("No trade data loaded.")
+            except Exception as exc:
+                st.error(f"Error fetching options data: {exc}")
+
+        contracts = st.session_state.get("open_positions_data", [])
+        if contracts:
+            rows = []
+            for c in contracts:
+                rows.append({
+                    "Contract": c.contract_symbol,
+                    "Underlying": c.underlying,
+                    "Strike": c.strike,
+                    "Expiry": str(c.expiry),
+                    "Type": "Call" if c.right == "C" else "Put",
+                    "Bid": f"${c.bid:.2f}",
+                    "Ask": f"${c.ask:.2f}",
+                    "Last": f"${c.last_price:.2f}",
+                    "IV": f"{c.implied_volatility:.1%}" if c.implied_volatility else "—",
+                    "Δ Delta": f"{c.delta:.3f}" if c.delta is not None else "—",
+                    "Γ Gamma": f"{c.gamma:.4f}" if c.gamma is not None else "—",
+                    "Θ Theta": f"{c.theta:.3f}" if c.theta is not None else "—",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("Click 'Refresh Options Data' to load current positions.")
+
+    # ------------------------------------------------------------------
+    # Tab 3 — Historical OHLCV
+    # ------------------------------------------------------------------
+    with tab_history:
+        st.subheader("Historical OHLCV")
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            hist_ticker = st.text_input("Ticker", placeholder="e.g. MARA, SPY", key="md_hist_ticker").upper().strip()
+        with col2:
+            period = st.selectbox("Period", [30, 60, 90, 180, 365], index=2, key="md_hist_period")
+        with col3:
+            freq = st.selectbox("Frequency", ["daily", "monthly"], key="md_hist_freq")
+
+        if st.button("Get History", key="md_hist_btn") and hist_ticker:
+            with st.spinner(f"Fetching {hist_ticker} {freq} data ({period} days)..."):
+                bars = _market_data.get_historical_ohlcv(hist_ticker, period_days=period, frequency=freq)
+
+            if bars:
+                import plotly.graph_objects as go
+                df_bars = pd.DataFrame([
+                    {"Date": b.date, "Open": b.open, "High": b.high,
+                     "Low": b.low, "Close": b.close, "Volume": b.volume}
+                    for b in bars
+                ])
+                fig = go.Figure(data=[go.Candlestick(
+                    x=df_bars["Date"], open=df_bars["Open"],
+                    high=df_bars["High"], low=df_bars["Low"], close=df_bars["Close"]
+                )])
+                fig.update_layout(
+                    title=f"{hist_ticker} — {freq.title()} OHLCV",
+                    xaxis_title="Date", yaxis_title="Price (USD)",
+                    xaxis_rangeslider_visible=False, height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(df_bars, use_container_width=True, hide_index=True)
+            else:
+                st.warning(f"No data returned for {hist_ticker}. Check ticker symbol.")
 
 
 if __name__ == "__main__":
