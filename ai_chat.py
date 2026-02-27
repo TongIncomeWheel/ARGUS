@@ -2,6 +2,7 @@
 Unified AI Chat Integration for Income Wheel
 Supports multiple AI models: Gemini (Pro/Flash) and Claude
 """
+import os
 import streamlit as st
 import pandas as pd
 from typing import List, Dict, Any, Optional
@@ -10,6 +11,13 @@ import re
 import json
 import numpy as np
 import logging
+
+# Load .env file if present (local development)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed; rely on env vars being set externally
 
 logger = logging.getLogger(__name__)
 
@@ -1093,15 +1101,19 @@ def render_ai_chat(df_trades: Optional[pd.DataFrame] = None,
     
     # API Key management
     if selected_model.startswith("Gemini"):
-        # Gemini API key (hardcoded for now)
-        api_key = "AIzaSyBiC556FoygjXAvcwyWDMW_ArbKLIXBX0g"
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            st.error("GEMINI_API_KEY is not set. Add it to your .env file (see .env.example).")
+            st.stop()
         model_type = "gemini-pro" if "Pro" in selected_model else "gemini-flash"
     else:
-        # Hardcoded Claude API key (no user input needed)
-        DEFAULT_CLAUDE_API_KEY = "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"
-        
+        # Claude API key from environment variable
         if 'claude_api_key' not in st.session_state:
-            st.session_state.claude_api_key = DEFAULT_CLAUDE_API_KEY
+            claude_key = os.environ.get("CLAUDE_API_KEY")
+            if not claude_key:
+                st.error("CLAUDE_API_KEY is not set. Add it to your .env file (see .env.example).")
+                st.stop()
+            st.session_state.claude_api_key = claude_key
         
         # Use hardcoded API key (no user input required)
         api_key = st.session_state.claude_api_key
@@ -1191,7 +1203,7 @@ def render_ai_chat(df_trades: Optional[pd.DataFrame] = None,
                 # Resolve model type for report (may differ from chat)
                 _rmt = _report_model
                 if _rmt.startswith("Gemini"):
-                    _r_api_key = "AIzaSyBiC556FoygjXAvcwyWDMW_ArbKLIXBX0g"
+                    _r_api_key = os.environ.get("GEMINI_API_KEY", "")
                     _r_mtype = "gemini-pro" if "Pro" in _rmt else "gemini-flash"
                 else:
                     _r_api_key = st.session_state.get("claude_api_key", "")
