@@ -30,5 +30,10 @@ Thumbs.db
 # Windows shortcuts
 *.lnk
 
+# Environment variables — NEVER commit real keys
+.env
+.env.local
+.env.*.local
+
 # IDX Config - Cloud Only (safe to commit, public config)
 # .idx/ is intentionally tracked
