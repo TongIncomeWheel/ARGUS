@@ -33,6 +33,8 @@ def get_tickers_for_dropdown(portfolio: str, df_trades=None):
 from calculations import CapitalCalculator, PremiumCalculator, QuotaCalculator, RiskCalculator, CSPTankCalculator, PMCCCalculator
 from models import TradeValidator, generate_trade_id, generate_audit_id
 from price_feed import PriceFeed, display_price_status, get_cached_prices
+from market_data import MarketDataService as _MarketDataService
+_market_data = _MarketDataService()
 from persistence import get_portfolio_deposit, save_portfolio_deposit, get_margin_percentages, save_margin_percentages, get_capital_allocation, save_capital_allocation, get_portfolio_deposit_sgd, save_portfolio_deposit_sgd, get_fx_rate, save_fx_rate, get_pmcc_tickers, save_pmcc_tickers, get_tickers, save_tickers
 from ai_chat import render_ai_chat
 from strategy_ui import render_strategy_instructions
@@ -522,7 +524,7 @@ def render_sidebar():
                 "Navigate",
                 ["📊 Dashboard", "📋 CIO Report", "📅 Daily Helper", "📝 Entry Forms",
                  "📈 Expiry Ladder", "📊 Performance", "📋 All Positions", "⚙️ Margin Config", "📚 Strategy Instructions",
-                 "🔍 Income Scanner"],
+                 "🔍 Income Scanner", "📡 Market Data"],
                 key="navigation_radio",
                 label_visibility="collapsed"
             )
@@ -1212,12 +1214,18 @@ def render_daily_helper():
     except Exception as e:
         st.warning(f"⚠️ Could not fetch prices: {e}")
         live_prices = st.session_state.get('live_prices', {})
-    
-    # Display connection status
-    display_price_status(True)  # Yahoo Finance always available
-    
+
+    # Fetch options data + Greeks for open positions (Mode 1 — auto-feed)
+    try:
+        df_options_open = df_open[df_open['TradeType'].isin(['CC', 'CSP'])].copy()
+        if not df_options_open.empty:
+            open_positions_data = _market_data.get_open_positions_data(df_options_open)
+            st.session_state.open_positions_data = open_positions_data
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch options data: {e}")
+
     st.divider()
-    
+
     # Live prices display
     st.subheader("📈 Live Prices")
     price_cols = st.columns(len(tickers))
@@ -1348,6 +1356,12 @@ def render_daily_helper():
             with col2:
                 st.metric("Total Quantity", f"{int(total_qty):,}")
             
+            # Build lookup map from live options data for P&L enrichment
+            contracts_map = {}
+            for _c in st.session_state.get("open_positions_data", []):
+                _key = (_c.underlying, float(_c.strike), _c.right, str(_c.expiry))
+                contracts_map[_key] = _c
+
             # Create a table for this ticker
             display_data = []
             expiry_dates_list = []  # Store expiry dates for styling
@@ -1378,16 +1392,39 @@ def render_daily_helper():
                 
                 expiry_dates_list.append(expires_this_week)
                 
+                # Look up live options data for Mark Price + Contract P&L
+                right_code = 'C' if row['TradeType'] == 'CC' else 'P'
+                expiry_key = pd.to_datetime(row['Expiry_Date']).strftime('%Y-%m-%d') if pd.notna(row['Expiry_Date']) else ''
+                live_contract = contracts_map.get((row['Ticker'], float(row['Strike']), right_code, expiry_key))
+
+                if live_contract:
+                    mark_price = live_contract.last_price if live_contract.last_price > 0 else (live_contract.bid + live_contract.ask) / 2
+                    # Sold option P&L: premium collected - current mark (positive = profit)
+                    contract_pl = (premium - mark_price) * qty * 100 if premium > 0 else None
+                    mark_str = f"${mark_price:.2f}"
+                    pl_str = f"${contract_pl:+,.2f}" if contract_pl is not None else "—"
+                    delta_str = f"{live_contract.delta:.3f}" if live_contract.delta is not None else "—"
+                    theta_str = f"{live_contract.theta:.3f}" if live_contract.theta is not None else "—"
+                else:
+                    mark_str = "—"
+                    pl_str = "—"
+                    delta_str = "—"
+                    theta_str = "—"
+
                 display_data.append({
                     'TradeID': row['TradeID'],
                     'Type': row['TradeType'],
-                    'Quantity': int(qty),
-                    'Expiry Date': expiry_date,
+                    'Qty': int(qty),
+                    'Expiry': expiry_date,
                     'Strike': f"${row['Strike']:.2f}",
-                    'Current': f"${row['Current_Price']:.2f}",
-                    'DTE': f"{int(row['DTE_Calc'])} days",
-                    'Distance to Spot': distance_str,
-                    'Premium Expected': f"${premium_expected:,.2f}",
+                    'Spot': f"${row['Current_Price']:.2f}",
+                    'DTE': int(row['DTE_Calc']),
+                    'Dist to Spot': distance_str,
+                    'Prem Sold': f"${premium:.2f}",
+                    'Mark': mark_str,
+                    'Contract P&L': pl_str,
+                    'Δ': delta_str,
+                    'Θ': theta_str,
                     'Risk': f"{risk_emoji} {risk}" if risk != 'NONE' else f"{risk_emoji} Safe"
                 })
             
@@ -1408,16 +1445,20 @@ def render_daily_helper():
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "TradeID": st.column_config.TextColumn("TradeID", width="small"),
-                    "Type": st.column_config.TextColumn("Type", width="small"),
-                    "Quantity": st.column_config.NumberColumn("Quantity", width="small", format="%d"),
-                    "Expiry Date": st.column_config.TextColumn("Expiry Date", width="small"),
-                    "Strike": st.column_config.TextColumn("Strike", width="small"),
-                    "Current": st.column_config.TextColumn("Current", width="small"),
-                    "DTE": st.column_config.TextColumn("DTE", width="small"),
-                    "Distance to Spot": st.column_config.TextColumn("Distance to Spot", width="medium"),
-                    "Premium Expected": st.column_config.TextColumn("Premium Expected", width="medium"),
-                    "Risk": st.column_config.TextColumn("Risk", width="medium")
+                    "TradeID":       st.column_config.TextColumn("TradeID",       width="small"),
+                    "Type":          st.column_config.TextColumn("Type",          width="small"),
+                    "Qty":           st.column_config.NumberColumn("Qty",         width="small", format="%d"),
+                    "Expiry":        st.column_config.TextColumn("Expiry",        width="small"),
+                    "Strike":        st.column_config.TextColumn("Strike",        width="small"),
+                    "Spot":          st.column_config.TextColumn("Spot",          width="small"),
+                    "DTE":           st.column_config.NumberColumn("DTE",         width="small", format="%d"),
+                    "Dist to Spot":  st.column_config.TextColumn("Dist to Spot",  width="medium"),
+                    "Prem Sold":     st.column_config.TextColumn("Prem Sold",     width="small"),
+                    "Mark":          st.column_config.TextColumn("Mark",          width="small"),
+                    "Contract P&L":  st.column_config.TextColumn("Contract P&L",  width="small"),
+                    "Δ":             st.column_config.TextColumn("Δ Delta",       width="small"),
+                    "Θ":             st.column_config.TextColumn("Θ Theta",       width="small"),
+                    "Risk":          st.column_config.TextColumn("Risk",          width="medium"),
                 }
             )
             st.divider()
@@ -4964,6 +5005,211 @@ def main():
         render_strategy_instructions()
     elif page == "🔍 Income Scanner":
         render_income_scanner()
+    elif page == "📡 Market Data":
+        render_market_data_panel()
+
+
+def render_market_data_panel():
+    """
+    Standalone Market Data query panel (Mode 2B).
+    Allows user to query equity prices, options data, and historical OHLCV
+    independently of the live positions feed.
+    """
+    st.header("📡 Market Data")
+
+    # ------------------------------------------------------------------
+    # Service Status Banner
+    # ------------------------------------------------------------------
+    alpaca_ok = _market_data.alpaca_available
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        st.success("🟢 yfinance — Equity + Options Chain (15 min delay)")
+    with col_s2:
+        if alpaca_ok:
+            st.success("🟢 Alpaca — Greeks Δ Γ Θ enabled")
+        else:
+            st.warning("🟡 Alpaca — Greeks disabled (add keys to .env)")
+    with col_s3:
+        st.success("🟢 Stooq — Historical OHLCV available")
+
+    st.divider()
+
+    tab_equity, tab_options, tab_history = st.tabs(["Equity Quote", "Options Chain", "Historical OHLCV"])
+
+    # ------------------------------------------------------------------
+    # Tab 1 — Equity Quote
+    # ------------------------------------------------------------------
+    with tab_equity:
+        st.subheader("Live Equity Quote")
+        ticker_input = st.text_input("Ticker symbol", placeholder="e.g. MARA, SPY", key="md_equity_ticker").upper().strip()
+        if st.button("Get Quote", key="md_equity_btn") and ticker_input:
+            with st.spinner(f"Fetching {ticker_input}..."):
+                quotes = _market_data.get_equity_prices([ticker_input])
+            if ticker_input in quotes:
+                q = quotes[ticker_input]
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Price", f"${q.price:.2f}")
+                c2.metric("Prev Close", f"${q.prev_close:.2f}")
+                change_pct = ((q.price - q.prev_close) / q.prev_close * 100) if q.prev_close else 0
+                c3.metric("Change", f"{change_pct:+.2f}%")
+                st.caption(f"As of {q.timestamp.strftime('%Y-%m-%d %H:%M:%S')} (15-min delay)")
+            else:
+                st.warning(f"Could not retrieve price for {ticker_input}.")
+
+    # ------------------------------------------------------------------
+    # Tab 2 — Options Chain
+    # ------------------------------------------------------------------
+    with tab_options:
+
+        # ── Section A: Open Positions ──────────────────────────────────
+        st.subheader("📋 Open Positions — Live Options Data")
+        st.caption("Bid / Ask / Last / IV and Greeks for your current open CC and CSP positions.")
+
+        if st.button("Refresh Open Positions Data", key="md_options_btn"):
+            try:
+                df_trades = st.session_state.get("df_trades")
+                if df_trades is not None and not df_trades.empty:
+                    df_open_opts = df_trades[
+                        (df_trades["Status"] == "Open") &
+                        (df_trades["TradeType"].isin(["CC", "CSP"]))
+                    ].copy()
+                    with st.spinner("Fetching options data..."):
+                        contracts = _market_data.get_open_positions_data(df_open_opts)
+                    st.session_state.open_positions_data = contracts
+                else:
+                    st.warning("No trade data loaded.")
+            except Exception as exc:
+                st.error(f"Error fetching options data: {exc}")
+
+        contracts = st.session_state.get("open_positions_data", [])
+        if contracts:
+            rows = []
+            for c in contracts:
+                rows.append({
+                    "Contract": c.contract_symbol,
+                    "Underlying": c.underlying,
+                    "Strike": f"${c.strike:.2f}",
+                    "Expiry": str(c.expiry),
+                    "Type": "Call" if c.right == "C" else "Put",
+                    "Bid": f"${c.bid:.2f}",
+                    "Ask": f"${c.ask:.2f}",
+                    "Last": f"${c.last_price:.2f}",
+                    "IV": f"{c.implied_volatility:.1%}" if c.implied_volatility else "—",
+                    "Δ Delta": f"{c.delta:.3f}" if c.delta is not None else "—",
+                    "Γ Gamma": f"{c.gamma:.4f}" if c.gamma is not None else "—",
+                    "Θ Theta": f"{c.theta:.3f}" if c.theta is not None else "—",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("Click 'Refresh Open Positions Data' to load current positions.")
+
+        st.divider()
+
+        # ── Section B: Option Lookup ───────────────────────────────────
+        st.subheader("🔍 Option Lookup")
+        st.caption("Search any option contract by ticker, expiry, type and strike.")
+
+        col_lt, col_lcp = st.columns([2, 1])
+        with col_lt:
+            lookup_ticker = st.text_input("Ticker", placeholder="e.g. MARA, SPY", key="opt_lookup_ticker").upper().strip()
+        with col_lcp:
+            lookup_right_label = st.radio("Type", ["Call (C)", "Put (P)"], key="opt_lookup_right", horizontal=True)
+
+        if lookup_ticker:
+            try:
+                import yfinance as _yf_lookup
+                available_expiries = list(_yf_lookup.Ticker(lookup_ticker).options)
+            except Exception:
+                available_expiries = []
+
+            if available_expiries:
+                col_lexp, col_lstrike, col_lbtn = st.columns([2, 1, 1])
+                with col_lexp:
+                    lookup_expiry = st.selectbox("Expiry Date", available_expiries, key="opt_lookup_expiry")
+                with col_lstrike:
+                    lookup_strike = st.number_input("Strike ($)", min_value=0.0, step=0.5, format="%.2f", key="opt_lookup_strike")
+                with col_lbtn:
+                    st.write("")
+                    st.write("")
+                    search_clicked = st.button("🔍 Search", key="opt_lookup_btn", use_container_width=True)
+
+                if search_clicked and lookup_strike > 0:
+                    right_code = "C" if "Call" in lookup_right_label else "P"
+                    trade_type = "CC" if right_code == "C" else "CSP"
+                    fake_df = pd.DataFrame([{
+                        "Ticker": lookup_ticker,
+                        "Option_Strike_Price_(USD)": lookup_strike,
+                        "Expiry_Date": lookup_expiry,
+                        "TradeType": trade_type,
+                        "Status": "Open"
+                    }])
+                    with st.spinner(f"Looking up {lookup_ticker} {lookup_expiry} {'Call' if right_code == 'C' else 'Put'} ${lookup_strike:.2f}…"):
+                        results = _market_data.get_open_positions_data(fake_df)
+
+                    if results:
+                        c = results[0]
+                        # ── Result Card ──
+                        with st.container(border=True):
+                            st.markdown(f"### `{c.contract_symbol}`")
+                            st.caption(f"{c.underlying} · {'Call' if c.right == 'C' else 'Put'} · Strike ${c.strike:.2f} · Expires {c.expiry}")
+                            st.divider()
+                            col1, col2, col3, col4 = st.columns(4)
+                            col1.metric("Last Price", f"${c.last_price:.2f}")
+                            col2.metric("Bid", f"${c.bid:.2f}")
+                            col3.metric("Ask", f"${c.ask:.2f}")
+                            col4.metric("IV", f"{c.implied_volatility:.1%}" if c.implied_volatility else "—")
+                            if alpaca_ok:
+                                st.divider()
+                                col5, col6, col7, col8 = st.columns(4)
+                                col5.metric("Δ Delta", f"{c.delta:.3f}" if c.delta is not None else "—")
+                                col6.metric("Γ Gamma", f"{c.gamma:.4f}" if c.gamma is not None else "—")
+                                col7.metric("Θ Theta / day", f"{c.theta:.3f}" if c.theta is not None else "—")
+                                col8.metric("Timestamp", c.timestamp.strftime("%H:%M:%S"))
+                    else:
+                        st.warning("No contract found. Verify the strike is exact and expiry is valid for this ticker.")
+                elif search_clicked and lookup_strike == 0:
+                    st.warning("Please enter a strike price greater than 0.")
+            else:
+                if lookup_ticker:
+                    st.warning(f"Could not load expiry dates for **{lookup_ticker}**. Check ticker symbol.")
+
+    # ------------------------------------------------------------------
+    # Tab 3 — Historical OHLCV
+    # ------------------------------------------------------------------
+    with tab_history:
+        st.subheader("Historical OHLCV")
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            hist_ticker = st.text_input("Ticker", placeholder="e.g. MARA, SPY", key="md_hist_ticker").upper().strip()
+        with col2:
+            period = st.selectbox("Period", [30, 60, 90, 180, 365], index=2, key="md_hist_period")
+        with col3:
+            freq = st.selectbox("Frequency", ["daily", "monthly"], key="md_hist_freq")
+
+        if st.button("Get History", key="md_hist_btn") and hist_ticker:
+            with st.spinner(f"Fetching {hist_ticker} {freq} data ({period} days)..."):
+                bars = _market_data.get_historical_ohlcv(hist_ticker, period_days=period, frequency=freq)
+
+            if bars:
+                import plotly.graph_objects as go
+                df_bars = pd.DataFrame([
+                    {"Date": b.date, "Open": b.open, "High": b.high,
+                     "Low": b.low, "Close": b.close, "Volume": b.volume}
+                    for b in bars
+                ])
+                fig = go.Figure(data=[go.Candlestick(
+                    x=df_bars["Date"], open=df_bars["Open"],
+                    high=df_bars["High"], low=df_bars["Low"], close=df_bars["Close"]
+                )])
+                fig.update_layout(
+                    title=f"{hist_ticker} — {freq.title()} OHLCV",
+                    xaxis_title="Date", yaxis_title="Price (USD)",
+                    xaxis_rangeslider_visible=False, height=400
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(df_bars, use_container_width=True, hide_index=True)
+            else:
+                st.warning(f"No data returned for {hist_ticker}. Check ticker symbol.")
 
 
 if __name__ == "__main__":
