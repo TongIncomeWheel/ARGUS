@@ -5083,11 +5083,55 @@ def render_market_data_panel():
 
         contracts = st.session_state.get("open_positions_data", [])
         if contracts:
+            # ── Build premium / qty lookup from open trade rows ──────────
+            _prem_lookup: dict = {}
+            _df_trades_src = st.session_state.get("df_trades")
+            if _df_trades_src is not None and not _df_trades_src.empty:
+                _req_cols = ["Status", "TradeType", "Ticker", "Option_Strike_Price_(USD)", "Expiry_Date"]
+                if all(_rc in _df_trades_src.columns for _rc in _req_cols):
+                    _open_opts = _df_trades_src[
+                        (_df_trades_src["Status"].str.upper() == "OPEN") &
+                        (_df_trades_src["TradeType"].isin(["CC", "CSP"]))
+                    ]
+                    for _, _r in _open_opts.iterrows():
+                        try:
+                            _right = "C" if _r["TradeType"] == "CC" else "P"
+                            _expiry = pd.to_datetime(_r["Expiry_Date"]).strftime("%Y-%m-%d")
+                            _strike = float(_r["Option_Strike_Price_(USD)"])
+                            _prem = float(pd.to_numeric(_r.get("OptPremium", 0), errors="coerce") or 0)
+                            _qty = float(pd.to_numeric(_r.get("Quantity", 0), errors="coerce") or 0)
+                            _lkey = (str(_r["Ticker"]).upper(), _strike, _right, _expiry)
+                            # Accumulate across multiple open trades on the same contract
+                            # (same ticker/strike/expiry can have >1 trade row)
+                            if _lkey in _prem_lookup:
+                                _prev_prem_rcvd, _prev_qty = _prem_lookup[_lkey]
+                                _prem_lookup[_lkey] = (
+                                    _prev_prem_rcvd + _prem * _qty * 100,
+                                    _prev_qty + _qty,
+                                )
+                            else:
+                                # Store total $ premium received and total contracts
+                                _prem_lookup[_lkey] = (_prem * _qty * 100, _qty)
+                        except Exception:
+                            pass
+
             rows = []
             for c in contracts:
+                # Mark price: use last if valid, else mid
+                _mark = c.last_price if c.last_price > 0 else (c.bid + c.ask) / 2
+                # Look up aggregated premium / qty from trade data
+                _key = (c.underlying, float(c.strike), c.right, str(c.expiry))
+                if _key in _prem_lookup:
+                    _total_prem_rcvd, _total_qty = _prem_lookup[_key]
+                    # P&L = total premium received − current value of all contracts
+                    pl_num = _total_prem_rcvd - _mark * _total_qty * 100 if _total_prem_rcvd > 0 else None
+                else:
+                    pl_num = None
+                pl_str = f"${pl_num:+,.2f}" if pl_num is not None else "—"
                 rows.append({
                     "Contract": c.contract_symbol,
                     "Underlying": c.underlying,
+                    "P&L": pl_str,
                     "Strike": f"${c.strike:.2f}",
                     "Expiry": str(c.expiry),
                     "Type": "Call" if c.right == "C" else "Put",
@@ -5099,7 +5143,24 @@ def render_market_data_panel():
                     "Γ Gamma": f"{c.gamma:.4f}" if c.gamma is not None else "—",
                     "Θ Theta": f"{c.theta:.3f}" if c.theta is not None else "—",
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+            # Apply green / red bold styling to P&L column
+            def _style_pl(val):
+                if val == "—":
+                    return ""
+                try:
+                    num = float(str(val).replace("$", "").replace(",", ""))
+                    if num > 0:
+                        return "color: green; font-weight: bold"
+                    elif num < 0:
+                        return "color: red; font-weight: bold"
+                except Exception:
+                    pass
+                return ""
+
+            _df_positions = pd.DataFrame(rows)
+            _styled = _df_positions.style.map(_style_pl, subset=["P&L"])
+            st.dataframe(_styled, use_container_width=True, hide_index=True)
         else:
             st.info("Click 'Refresh Open Positions Data' to load current positions.")
 
