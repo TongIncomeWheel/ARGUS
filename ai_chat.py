@@ -2,13 +2,22 @@
 Unified AI Chat Integration for Income Wheel
 Supports multiple AI models: Gemini (Pro/Flash) and Claude
 """
+import os
 import streamlit as st
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import re
 import json
 import numpy as np
 import logging
+
+# Load .env file if present (local development)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed; rely on env vars being set externally
 
 logger = logging.getLogger(__name__)
 
@@ -798,7 +807,14 @@ You can help with:
         )
         
         data_summary = self.get_data_summary(df_trades=df_trades, df_open=df_open, portfolio=portfolio)
-        
+
+        # Inject historical OHLCV context when user asks about price history
+        historical_section = ""
+        try:
+            historical_section = _build_historical_context(user_message)
+        except Exception as _e:
+            logger.warning(f"Historical OHLCV context failed: {_e}")
+
         # Add strategy instructions context if provided (token-efficient retrieval)
         strategy_section = ""
         if strategy_context:
@@ -811,7 +827,7 @@ You can help with:
         # Build prompt
         prompt = f"""{system_context}
 
-{data_summary}{strategy_section}{web_search_results}
+{data_summary}{historical_section}{strategy_section}{web_search_results}
 ## CONVERSATION HISTORY:
 """
         
@@ -1085,15 +1101,19 @@ def render_ai_chat(df_trades: Optional[pd.DataFrame] = None,
     
     # API Key management
     if selected_model.startswith("Gemini"):
-        # Gemini API key (hardcoded for now)
-        api_key = "AIzaSyBiC556FoygjXAvcwyWDMW_ArbKLIXBX0g"
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            st.error("GEMINI_API_KEY is not set. Add it to your .env file (see .env.example).")
+            st.stop()
         model_type = "gemini-pro" if "Pro" in selected_model else "gemini-flash"
     else:
-        # Hardcoded Claude API key (no user input needed)
-        DEFAULT_CLAUDE_API_KEY = "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"
-        
+        # Claude API key from environment variable
         if 'claude_api_key' not in st.session_state:
-            st.session_state.claude_api_key = DEFAULT_CLAUDE_API_KEY
+            claude_key = os.environ.get("CLAUDE_API_KEY")
+            if not claude_key:
+                st.error("CLAUDE_API_KEY is not set. Add it to your .env file (see .env.example).")
+                st.stop()
+            st.session_state.claude_api_key = claude_key
         
         # Use hardcoded API key (no user input required)
         api_key = st.session_state.claude_api_key
@@ -1183,7 +1203,7 @@ def render_ai_chat(df_trades: Optional[pd.DataFrame] = None,
                 # Resolve model type for report (may differ from chat)
                 _rmt = _report_model
                 if _rmt.startswith("Gemini"):
-                    _r_api_key = "AIzaSyBiC556FoygjXAvcwyWDMW_ArbKLIXBX0g"
+                    _r_api_key = os.environ.get("GEMINI_API_KEY", "")
                     _r_mtype = "gemini-pro" if "Pro" in _rmt else "gemini-flash"
                 else:
                     _r_api_key = st.session_state.get("claude_api_key", "")
@@ -1372,3 +1392,88 @@ def render_ai_chat(df_trades: Optional[pd.DataFrame] = None,
             st.session_state.ai_chat_history = []
             clear_chat_history()
             st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Historical OHLCV context helper — injected into LLM prompt when relevant
+# ---------------------------------------------------------------------------
+
+# Keywords that trigger a historical price data fetch
+_HISTORY_PATTERNS = re.compile(
+    r'\b(histor|last\s+\d+\s+day|past\s+\d+\s+day|trend|monthly\s+close|'
+    r'price\s+over|how\s+has\s+.{1,20}\s+been|ohlc|candlestick|chart)\b',
+    re.IGNORECASE
+)
+
+# Ticker extraction: uppercase 1-5 letter word
+_TICKER_PATTERN = re.compile(r'\b([A-Z]{1,5})\b')
+
+# "last N days / months" extraction
+_PERIOD_PATTERN = re.compile(r'last\s+(\d+)\s+(day|month|week)', re.IGNORECASE)
+
+
+def _build_historical_context(user_message: str) -> str:
+    """
+    Detect historical price queries in user_message and inject OHLCV data.
+    Returns a formatted markdown section to append to the LLM prompt,
+    or an empty string if no historical query is detected.
+    """
+    if not _HISTORY_PATTERNS.search(user_message):
+        return ""
+
+    try:
+        from market_data import MarketDataService
+        service = MarketDataService()
+    except Exception:
+        return ""
+
+    # Extract ticker — look for known ARGUS tickers first, then any uppercase word
+    from config import TICKERS as _TICKERS
+    ticker = None
+    msg_upper = user_message.upper()
+    for t in _TICKERS:
+        if t in msg_upper:
+            ticker = t
+            break
+    if not ticker:
+        matches = _TICKER_PATTERN.findall(user_message)
+        # Filter out common English words that look like tickers
+        _STOP = {"I", "A", "THE", "AND", "OR", "FOR", "OF", "IN", "ON", "AT", "MY", "ME"}
+        candidates = [m for m in matches if m not in _STOP and len(m) >= 2]
+        ticker = candidates[0] if candidates else None
+
+    if not ticker:
+        return ""
+
+    # Determine period and frequency
+    period_days = 90
+    frequency = "daily"
+    period_match = _PERIOD_PATTERN.search(user_message)
+    if period_match:
+        n, unit = int(period_match.group(1)), period_match.group(2).lower()
+        if unit == "month":
+            period_days = n * 30
+            frequency = "monthly"
+        elif unit == "week":
+            period_days = n * 7
+        else:
+            period_days = n
+    elif re.search(r'month', user_message, re.IGNORECASE):
+        frequency = "monthly"
+        period_days = 365
+
+    bars = service.get_historical_ohlcv(ticker, period_days=period_days, frequency=frequency)
+    if not bars:
+        return ""
+
+    lines = [
+        f"\n\n## HISTORICAL PRICE DATA — {ticker} ({frequency}, last {period_days} days)",
+        "| Date | Open | High | Low | Close | Volume |",
+        "|------|------|------|-----|-------|--------|",
+    ]
+    for b in bars[-60:]:  # Cap at 60 rows to stay token-efficient
+        lines.append(
+            f"| {b.date} | {b.open:.2f} | {b.high:.2f} | {b.low:.2f} | {b.close:.2f} | {b.volume:,} |"
+        )
+    lines.append("(Source: Stooq via pandas-datareader — use this data in your analysis)\n")
+    return "\n".join(lines)
