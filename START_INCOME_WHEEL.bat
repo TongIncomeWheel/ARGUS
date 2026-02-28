@@ -36,6 +36,13 @@ echo.
 REM Change to environment directory
 cd /d %APP_DIR%
 
+REM Auto-update Prod from GitHub before launching
+if "%CHOICE%"=="1" (
+    echo Pulling latest from GitHub...
+    git pull origin main
+    echo.
+)
+
 echo Checking if port %PORT% is available...
 powershell -Command "$conn = netstat -ano | findstr ':%PORT%' | findstr 'LISTENING'; if ($conn) { $procId = ($conn -split '\s+')[-1]; Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue; Write-Output 'Killed process on port %PORT%'; Start-Sleep -Seconds 2 }"
 
